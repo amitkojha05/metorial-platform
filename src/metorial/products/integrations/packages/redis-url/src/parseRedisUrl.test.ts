@@ -21,6 +21,7 @@ describe('parseRedisUrl', () => {
     const expected = {
       host: 'localhost',
       port: 6379,
+      username: 'user',
       password: 'password',
       db: 0
     };
@@ -42,5 +43,22 @@ describe('parseRedisUrl', () => {
     const result = parseRedisUrl(url);
 
     expect(result).toEqual(expected);
+  });
+
+  test('should default to database 0 and port 6379', () => {
+    expect(parseRedisUrl('redis://localhost')).toMatchObject({
+      host: 'localhost',
+      port: 6379,
+      password: '',
+      db: 0
+    });
+    expect(parseRedisUrl('redis://localhost:6380/')).toMatchObject({ port: 6380, db: 0 });
+  });
+
+  test('should decode a percent-encoded password', () => {
+    let result = parseRedisUrl('rediss://:p%40ss%2Fw%3Ard@cache.internal:6379');
+    expect(result.password).toBe('p@ss/w:rd');
+    expect(result.db).toBe(0);
+    expect(result.tls).toEqual({ rejectUnauthorized: false });
   });
 });
