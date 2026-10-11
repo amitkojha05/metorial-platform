@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 let attemptDeliveryAddManyWithOps = vi.fn();
-let eventDeliveryIntentCreateManyAndReturn = vi.fn();
+let eventDeliveryIntentCreateMany = vi.fn();
+let eventDeliveryIntentFindMany = vi.fn();
 let eventDestinationListenerFindMany = vi.fn();
 let systemEventFindUnique = vi.fn();
 let dispatchProcessor: (data: { systemEventId: string; cursor?: string }) => Promise<void>;
@@ -11,7 +12,10 @@ vi.mock('./attempt', () => ({
 }));
 vi.mock('@metorial/db', () => ({
   db: {
-    eventDeliveryIntent: { createManyAndReturn: eventDeliveryIntentCreateManyAndReturn },
+    eventDeliveryIntent: {
+      createMany: eventDeliveryIntentCreateMany,
+      findMany: eventDeliveryIntentFindMany
+    },
     eventDestinationListener: { findMany: eventDestinationListenerFindMany },
     systemEvent: { findUnique: systemEventFindUnique }
   },
@@ -93,11 +97,11 @@ describe('event delivery dispatch', () => {
         }
       })
     ]);
-    eventDeliveryIntentCreateManyAndReturn.mockResolvedValue([{ id: 'evtdi_1' }]);
+    eventDeliveryIntentFindMany.mockResolvedValue([{ id: 'evtdi_1' }]);
 
     await dispatchProcessor({ systemEventId: 'evt_1' });
 
-    expect(eventDeliveryIntentCreateManyAndReturn).toHaveBeenCalledWith(
+    expect(eventDeliveryIntentCreateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: [
           expect.objectContaining({
@@ -106,10 +110,18 @@ describe('event delivery dispatch', () => {
             systemEventOid: BigInt(10)
           })
         ],
-        select: { id: true },
         skipDuplicates: true
       })
     );
+    expect(eventDeliveryIntentFindMany).toHaveBeenCalledWith({
+      where: {
+        systemEventOid: BigInt(10),
+        eventDestinationOid: { in: [BigInt(40)] },
+        status: 'pending',
+        attemptCount: 0
+      },
+      select: { id: true }
+    });
     expect(attemptDeliveryAddManyWithOps).toHaveBeenCalledWith([
       {
         data: { intentId: 'evtdi_1', attemptNumber: 1 },
@@ -118,7 +130,7 @@ describe('event delivery dispatch', () => {
     ]);
   });
 
-  it('does not schedule an attempt when another listener already created the delivery', async () => {
+  it('does not schedule a delivery that has already been attempted', async () => {
     systemEventFindUnique.mockResolvedValue(
       event({ id: 'evt_1', oid: BigInt(10), organizationOid: BigInt(20), instanceOid: null })
     );
@@ -137,14 +149,54 @@ describe('event delivery dispatch', () => {
         }
       })
     ]);
-    eventDeliveryIntentCreateManyAndReturn.mockResolvedValue([]);
+    eventDeliveryIntentFindMany.mockResolvedValue([]);
 
     await dispatchProcessor({ systemEventId: 'evt_1' });
 
-    expect(eventDeliveryIntentCreateManyAndReturn).toHaveBeenCalledWith(
+    expect(eventDeliveryIntentCreateMany).toHaveBeenCalledWith(
       expect.objectContaining({ skipDuplicates: true })
     );
     expect(attemptDeliveryAddManyWithOps).not.toHaveBeenCalled();
+  });
+
+  it('schedules the deliveries again when a retried dispatch finds them already created', async () => {
+    systemEventFindUnique.mockResolvedValue(
+      event({ id: 'evt_1', oid: BigInt(10), organizationOid: BigInt(20), instanceOid: null })
+    );
+    eventDestinationListenerFindMany.mockResolvedValue([
+      listener({
+        oid: BigInt(30),
+        eventDestinationOid: BigInt(40),
+        eventTypes: ['organization.created'],
+        eventDestination: {
+          status: 'active',
+          type: 'webhook',
+          retryStrategy: 'exponential',
+          retryMaxAttempts: 5,
+          retryBaseDelaySeconds: 10,
+          retryMaxDelaySeconds: 300
+        }
+      })
+    ]);
+
+    // First run: the delivery is created, but enqueueing its first attempt fails.
+    eventDeliveryIntentFindMany.mockResolvedValue([{ id: 'evtdi_1' }]);
+    attemptDeliveryAddManyWithOps.mockRejectedValueOnce(new Error('redis unavailable'));
+
+    await expect(dispatchProcessor({ systemEventId: 'evt_1' })).rejects.toThrow(
+      'redis unavailable'
+    );
+
+    // The queue retries the job. The delivery already exists, so nothing new is created.
+    await dispatchProcessor({ systemEventId: 'evt_1' });
+
+    expect(attemptDeliveryAddManyWithOps).toHaveBeenCalledTimes(2);
+    expect(attemptDeliveryAddManyWithOps).toHaveBeenLastCalledWith([
+      {
+        data: { intentId: 'evtdi_1', attemptNumber: 1 },
+        opts: { id: 'event-delivery-attempt:evtdi_1:1' }
+      }
+    ]);
   });
 });
 

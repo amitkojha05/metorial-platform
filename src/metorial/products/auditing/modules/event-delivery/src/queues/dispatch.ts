@@ -135,7 +135,7 @@ export let eventDeliveryDispatchQueueProcessor = eventDeliveryDispatchQueue.proc
         }
       }
 
-      let intents = await db.eventDeliveryIntent.createManyAndReturn({
+      await db.eventDeliveryIntent.createMany({
         data: await Promise.all(
           [...byDestination.values()].map(async listener => ({
             id: await ID.generateId('eventDeliveryIntent'),
@@ -153,8 +153,21 @@ export let eventDeliveryDispatchQueueProcessor = eventDeliveryDispatchQueue.proc
             nextAttemptAt: new Date()
           }))
         ),
-        // A redelivered dispatch job must not schedule the same event to the same destination twice.
-        skipDuplicates: true,
+        // A redelivered dispatch job must not create the same event-destination delivery twice.
+        skipDuplicates: true
+      });
+
+      // Schedule every delivery for these destinations that has not been attempted yet, not
+      // only the ones created above. A retried dispatch finds its deliveries already created,
+      // and if the first run failed to enqueue them they would stay pending forever. The job
+      // ID and the attempt guards make scheduling an already-queued delivery a no-op.
+      let intents = await db.eventDeliveryIntent.findMany({
+        where: {
+          systemEventOid: event.oid,
+          eventDestinationOid: { in: [...byDestination.keys()] },
+          status: 'pending',
+          attemptCount: 0
+        },
         select: { id: true }
       });
 
