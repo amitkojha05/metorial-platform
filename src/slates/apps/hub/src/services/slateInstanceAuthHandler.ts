@@ -349,14 +349,21 @@ class slateAuthHandlerServiceImpl {
       scopes: oauthCredentials.scopes
     });
     if (res.status === 'error') {
-      await db.slateAuthConfig.updateMany({
-        where: { oid: authConfig.oid },
-        data: {
-          errorCode: res.error.code,
-          errorMessage: res.error.message,
-          errorInvocationId: res.invocation.id
-        }
-      });
+      // A provider outage, timeout or rate limit says nothing about the credentials, and
+      // neither does our own invocation failing. Storing it would park the config in an
+      // error state that no later request clears, so only permanent failures are stored.
+      let isTransient = res.error.retryable === true || res.error.code === 'invocation_error';
+
+      if (!isTransient) {
+        await db.slateAuthConfig.updateMany({
+          where: { oid: authConfig.oid },
+          data: {
+            errorCode: res.error.code,
+            errorMessage: res.error.message,
+            errorInvocationId: res.invocation.id
+          }
+        });
+      }
     } else {
       await db.slateAuthConfig.updateMany({
         where: { oid: authConfig.oid },

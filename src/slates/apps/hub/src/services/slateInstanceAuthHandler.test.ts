@@ -351,4 +351,59 @@ describe('getSlateInstanceAuth refresh coordination', () => {
     expect(mocks.refreshOAuthToken).toHaveBeenCalledTimes(1);
     expect(mocks.syncSharedOAuthTokens).not.toHaveBeenCalled();
   });
+
+  // A provider outage, timeout or rate limit says nothing about the credentials, and neither
+  // does our own invocation failing. Storing it would park the config in an error state.
+  it.each([
+    { code: 'upstream.unavailable', retryable: true },
+    { code: 'upstream.timeout', retryable: true },
+    { code: 'upstream.rate_limited', retryable: true },
+    { code: 'invocation_error', retryable: undefined }
+  ])('does not store a transient $code refresh failure', async error => {
+    mocks.refreshOAuthToken.mockResolvedValue({
+      status: 'error',
+      invocation: { id: 'shiv_3', oid: 72n },
+      error: { ...error, message: 'Service unavailable' }
+    });
+
+    await expect(call()).rejects.toThrow(/Failed to refresh authentication token/);
+    expect(mocks.updateMany).not.toHaveBeenCalled();
+    expect(mocks.eventCreateMany).toHaveBeenCalledWith({
+      data: expect.objectContaining({ type: 'oauth_token_refresh_failed', configOid: 1n })
+    });
+  });
+
+  it('recovers on the next request after a transient refresh failure', async () => {
+    let stored: Record<string, unknown> = {};
+    mocks.updateMany.mockImplementationOnce(async ({ data }: { data: object }) => {
+      stored = { ...stored, ...data };
+      return { count: 1 };
+    });
+    mocks.findFirst.mockImplementation(async () => config(stored));
+    mocks.findFirstOrThrow.mockImplementation(async () => config(stored));
+    mocks.refreshOAuthToken.mockResolvedValueOnce({
+      status: 'error',
+      invocation: { id: 'shiv_3', oid: 72n },
+      error: { code: 'upstream.unavailable', message: 'Service unavailable', retryable: true }
+    });
+
+    await expect(call()).rejects.toThrow(/Failed to refresh authentication token/);
+    let result = await call();
+
+    expect(mocks.refreshOAuthToken).toHaveBeenCalledTimes(2);
+    expect(result.output).toEqual(newOutput);
+  });
+
+  it('still stores a refresh failure the provider marks as permanent', async () => {
+    mocks.refreshOAuthToken.mockResolvedValue({
+      status: 'error',
+      invocation: { id: 'shiv_3', oid: 72n },
+      error: { code: 'auth.invalid', message: 'invalid_grant', retryable: false }
+    });
+
+    await expect(call()).rejects.toThrow(/invalid_grant/);
+    expect(mocks.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ errorCode: 'auth.invalid' }) })
+    );
+  });
 });
